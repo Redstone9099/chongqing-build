@@ -1,0 +1,72 @@
+name: Build Windows services
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Download project package from release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/Redstone9099/-/releases/download/client-1.76/chongqing-legend-R007-full-project.zip'
+          Invoke-WebRequest -Uri $url -OutFile pkg.zip
+          Expand-Archive -Path pkg.zip -DestinationPath src -Force
+          Write-Host '--- package root ---'
+          Get-ChildItem src | Select-Object -First 20 Name | Format-Table -AutoSize | Out-String
+
+      - name: Setup .NET 8.0.425
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.425'
+
+      - name: dotnet info
+        shell: pwsh
+        run: dotnet --info
+
+      - name: C# regression tests (non-fatal)
+        continue-on-error: true
+        shell: pwsh
+        working-directory: src
+        run: |
+          foreach ($t in @('tests/engine-scheduler/SchedulerChecks.csproj','tests/engine-persistence/PersistenceChecks.csproj','tests/EnginePolicyTests/EnginePolicyTests.csproj')) {
+            Write-Host "===== test $t ====="
+            dotnet run --project $t -c Release
+            Write-Host "exit=$LASTEXITCODE"
+          }
+
+      - name: Publish six Windows services
+        shell: pwsh
+        working-directory: src
+        run: |
+          $pairs = @(@('DBSrv','DBServer'),@('LoginSrv','LoginSrv'),@('GameSrv','Mir200'),@('GameGate','RunGate'),@('SelGate','SelGate'),@('LoginGate','LoginGate'))
+          $failed = @()
+          foreach ($pair in $pairs) {
+            Write-Host "===== publishing $($pair[0]) ====="
+            dotnet publish "engine-source/src/$($pair[0])/$($pair[0]).csproj" -c Release -r win-x64 --self-contained true -p:PublishAot=false -p:PublishTrimmed=false -p:PublishSingleFile=false -o "engine/$($pair[1])"
+            if ($LASTEXITCODE -ne 0) { Write-Host "FAILED: $($pair[0])"; $failed += $pair[0] } else { Write-Host "OK: $($pair[0])" }
+          }
+          Write-Host "----- summary -----"
+          $failed | ForEach-Object { Write-Host "failed: $_" }
+          Write-Host ("failed count: " + $failed.Count)
+          if (Test-Path 'app/service_profile.py') { python app/service_profile.py; Write-Host "service_profile exit=$LASTEXITCODE" }
+
+      - name: Upload built services
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chongqing-windows-services
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            src/engine/**/*.exe
+            src/engine/**/*.dll
+            src/engine/**/*.json
+            src/engine/**/*.pdb
+            src/config/services.json
