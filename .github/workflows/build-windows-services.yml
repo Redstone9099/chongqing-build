@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -52,21 +52,38 @@ jobs:
             dotnet publish "engine-source/src/$($pair[0])/$($pair[0]).csproj" -c Release -r win-x64 --self-contained true -p:PublishAot=false -p:PublishTrimmed=false -p:PublishSingleFile=false -o "engine/$($pair[1])"
             if ($LASTEXITCODE -ne 0) { Write-Host "FAILED: $($pair[0])"; $failed += $pair[0] } else { Write-Host "OK: $($pair[0])" }
           }
-          Write-Host "----- summary -----"
-          $failed | ForEach-Object { Write-Host "failed: $_" }
           Write-Host ("failed count: " + $failed.Count)
-          if (Test-Path 'app/service_profile.py') { python app/service_profile.py; Write-Host "service_profile exit=$LASTEXITCODE" }
+          if (Test-Path 'app/service_profile.py') { python app/service_profile.py; Write-Host "service_profile exit=$LASTEXITCODE (ignored)" }
 
-      - name: Upload built services
+      - name: Package built services
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path 'src/engine') {
+            Get-ChildItem src/engine | Select-Object Name | Format-Table -AutoSize | Out-String
+            Compress-Archive -Path 'src/engine' -DestinationPath 'chongqing-windows-services.zip' -Force
+            $i = Get-Item 'chongqing-windows-services.zip'
+            Write-Host ("zip size = " + [math]::Round($i.Length/1MB,1) + " MB")
+            Write-Host ("sha256 = " + (Get-FileHash $i.FullName -Algorithm SHA256).Hash.ToLower())
+          } else { Write-Host 'no engine output directory' }
+
+      - name: Upload as workflow artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: chongqing-windows-services
           retention-days: 14
           if-no-files-found: warn
-          path: |
-            src/engine/**/*.exe
-            src/engine/**/*.dll
-            src/engine/**/*.json
-            src/engine/**/*.pdb
-            src/config/services.json
+          path: chongqing-windows-services.zip
+
+      - name: Publish to Release (so mirrors can serve it)
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if (-not (Test-Path 'chongqing-windows-services.zip')) { Write-Host 'nothing to publish'; exit 0 }
+          $tag = 'services-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+          Write-Host "creating release $tag"
+          gh release create $tag 'chongqing-windows-services.zip' --repo $env:GITHUB_REPOSITORY --title "Windows services build $tag" --notes "Built from chongqing-legend-R007-full-project.zip"
+          Write-Host "release done: $tag"
